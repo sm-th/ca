@@ -2,6 +2,7 @@
 *.pem
 *.p12
 *.cer
+*.eml
 ca.cnf
 ca-db/
 .smime-ca.*
