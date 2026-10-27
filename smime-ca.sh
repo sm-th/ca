@@ -240,7 +240,9 @@ subjectAltName = email:$email
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always
 EOF
-	"$OPENSSL" ca \
+	# SMIME_EMAIL in the environment: hand-made ca.cnf files may reference
+	# $ENV::SMIME_EMAIL, and OpenSSL refuses to load them when it is unset.
+	SMIME_EMAIL=$email "$OPENSSL" ca \
 		-config ca.cnf \
 		-extfile "$STAGE/ext.cnf" \
 		-extensions leaf \
