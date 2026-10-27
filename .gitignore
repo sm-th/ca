@@ -1,0 +1,10 @@
+# Keys, certificates and CA state created by smime-ca: never commit them.
+*.pem
+*.p12
+*.cer
+ca.cnf
+ca-db/
+.smime-ca.*
+
+result
+result-*
