@@ -20,8 +20,25 @@ Nix with flakes enabled. OpenSSL comes from the flake; the system `openssl`
 
 ## Running
 
+The tool reads the CA passphrase and the CA key, so run a version you have
+reviewed, not whatever the branch holds today. Either pin a commit:
+
+```bash
+smime-ca() { nix run github:sm-th/ca/<reviewed-commit-sha> -- "$@"; }
+```
+
+or use a local clone checked out at a commit you trust (it uses only committed
+files):
+
+```bash
+smime-ca() { nix run /path/to/clone -- "$@"; }
+```
+
+Update the pin deliberately, after reading the diff. The examples below use
+this `smime-ca` function.
+
 The tool works in the **current directory** (or `$SMIME_DIR`). Keep the CA in
-its own directory outside this repository and run the flake from there:
+its own directory outside this repository and run the tool from there:
 
 ```bash
 mkdir -p ~/maildir && cd ~/maildir
@@ -29,17 +46,12 @@ mkdir -p ~/maildir && cd ~/maildir
 export SMIME_NAME='Your Name'           # CN of the certificates
 export SMIME_EMAIL='you@example.com'    # address in subjectAltName
 
-nix run github:sm-th/ca -- init                       # once: create the CA
-nix run github:sm-th/ca -- issue encryption           # encryption.{key.pem,csr.pem,crt.pem,p12}
-nix run github:sm-th/ca -- issue signing thunderbird  # signing-thunderbird.*
-nix run github:sm-th/ca -- list
+smime-ca init                       # once: create the CA
+smime-ca issue encryption           # encryption.{key.pem,csr.pem,crt.pem,p12}
+smime-ca issue signing thunderbird  # signing-thunderbird.*
+smime-ca list
+smime-ca --help                     # full usage
 ```
-
-Arguments after `--` go to the tool; `nix run github:sm-th/ca -- --help`
-prints the full usage. Add `--refresh` to pick up the latest commit.
-
-A local clone works too: `nix run /path/to/clone -- list`. It uses only
-committed files.
 
 ## Commands
 
@@ -48,12 +60,12 @@ committed files.
 
 | Command | Result |
 | --- | --- |
-| `init [--name NAME] [--days N]` | `ca.key.pem`, `ca.crt.pem`, `ca.cer` (DER, for import), `ca.cnf`, `ca-db/`. CA subject is `CN=NAME Mail Root CA`, valid 10 years. |
-| `issue encryption\|signing [LABEL] [--name NAME] [--email EMAIL] [--days N]` | `PROFILE[-LABEL].{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. |
+| `init [--name NAME] [--days N]` | `ca.key.pem`, `ca.crt.pem`, `ca.cer` (DER, for import), `ca.cnf`, `ca-db/`. CA subject is `CN=NAME Mail Root CA`, valid 10 years, limited to email by `extendedKeyUsage=emailProtection`. |
+| `issue encryption\|signing [LABEL] [--name NAME] [--email EMAIL] [--days N]` | `PROFILE[-LABEL].{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. Refused if the CA expires earlier. |
 | `issue bot [LABEL] --email BOT_EMAIL [--name NAME] [--days N]` | `bot[-LABEL].{key.pem,csr.pem,crt.pem}`, no `.p12`. `--email` is required so the bot never gets your address. |
-| `export-p12 CERT [--legacy]` | `CERT.p12`, or `CERT-legacy.p12` with SHA-1/3DES. |
-| `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout, to be piped straight into the service that needs it. Refuses to write to a terminal. |
-| `cert-mail CERT [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. |
+| `export-p12 CERT [--legacy]` | `CERT.p12`, or `CERT-legacy.p12` with SHA-1/3DES. Never for `ca`. |
+| `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout, to be piped straight into the service that needs it. Refuses to write to a terminal and never exports `ca`. |
+| `cert-mail CERT [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. A non-ASCII subject is RFC 2047 encoded. |
 | `list` | Serial, subject, expiry, SAN and key usage of every `*.crt.pem`, marked `valid` or `EXPIRED`. |
 
 `issue` asks for the CA passphrase (checked immediately), a new key passphrase
@@ -80,11 +92,16 @@ certificate are kept even if a later step fails. If only the `.p12` failed,
 ## Using the certificates
 
 1. Import `ca.cer` into the mail client (or OS keychain) and trust it for
-   email. Correspondents need it too to validate your signatures.
+   email only, e.g. in macOS Keychain set just "Secure Mail (S/MIME)" to
+   "Always Trust". Correspondents need it too to validate your signatures.
+   Whoever trusts the CA for everything would also accept TLS certificates
+   signed with its key. CAs created by `init` carry
+   `extendedKeyUsage=emailProtection`, which limits them to email in clients
+   that enforce it; CAs made before that (or by hand) do not.
 2. Import the `.p12` files. If the importer reports a wrong password for a
    correct one, try `export-p12 CERT --legacy`. If that file is rejected too,
    delete it and lower the iteration count to the classic PKCS#12 default:
-   `KDF_ITER=2048 nix run github:sm-th/ca -- export-p12 CERT --legacy`.
+   `KDF_ITER=2048 smime-ca export-p12 CERT --legacy`.
    Fewer iterations make guessing the `.p12` passphrase cheaper, so use a
    strong one and delete the file after import.
 
@@ -105,13 +122,13 @@ A bot that receives encrypted mail and hands out its certificate needs one key
 for both decryption and signing:
 
 ```bash
-nix run github:sm-th/ca -- issue bot --email bot@example.com --name 'Mail Bot'
+smime-ca issue bot --email bot@example.com --name 'Mail Bot'
 
 # the bot cannot type a passphrase: give it the unencrypted key, never via a file
-nix run github:sm-th/ca -- export-key bot | wrangler secret put BOT_KEY
+smime-ca export-key bot | wrangler secret put BOT_KEY
 
 # a signed message that carries bot.crt.pem and ca.crt.pem
-nix run github:sm-th/ca -- cert-mail bot --to you@example.com > bot.eml
+smime-ca cert-mail bot --to you@example.com > bot.eml
 ```
 
 Opening `bot.eml` in a mail client (e.g. after copying it into a mailbox

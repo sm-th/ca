@@ -95,6 +95,17 @@ check_email() {
 
 check_base() {
 	[[ $1 =~ ^[A-Za-z0-9._-]+$ ]] || die "bad certificate name '$1': use the file name without extension, e.g. bot"
+	[ "$1" != ca ] || die "refusing to use the CA key here"
+}
+
+# encode_subject TEXT -- mail header text; non-ASCII becomes an RFC 2047 word
+encode_subject() {
+	local LC_ALL=C
+	case $1 in
+	*[[:cntrl:]]*) die "subject must not contain control characters" ;;
+	*[![:print:]]*) printf '=?UTF-8?B?%s?=' "$(printf '%s' "$1" | "$OPENSSL" base64 -A)" ;;
+	*) printf '%s' "$1" ;;
+	esac
 }
 
 need_files() {
@@ -220,6 +231,7 @@ cmd_init() {
 		-subj "/CN=$name Mail Root CA" \
 		-addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
 		-addext "keyUsage=critical,keyCertSign,cRLSign" \
+		-addext "extendedKeyUsage=emailProtection" \
 		-addext "subjectKeyIdentifier=hash" \
 		-addext "authorityKeyIdentifier=keyid:always" \
 		-out "$STAGE/ca.crt.pem" \
@@ -315,6 +327,8 @@ cmd_issue() {
 	for f in "${outputs[@]}"; do
 		[ ! -e "$f" ] || die "$SMIME_DIR/$f already exists: pick another LABEL"
 	done
+	"$OPENSSL" x509 -in ca.crt.pem -noout -checkend $((days * 86400)) >/dev/null ||
+		die "the CA expires within $days days: lower --days or create a new CA"
 
 	read_secret ca_pass "CA key passphrase"
 	check_key_pass ca.key.pem "$ca_pass"
@@ -426,8 +440,7 @@ cmd_cert_mail() {
 	check_email "$to" "set SMIME_EMAIL or pass --to"
 	verify_cert "$base.crt.pem" "$from" smimesign 2>/dev/null ||
 		die "$base.crt.pem is not a valid signing certificate"
-	subject=${subject:-S/MIME certificate of $from}
-	case $subject in *$'\n'* | *$'\r'*) die "subject must be a single line" ;; esac
+	subject=$(encode_subject "${subject:-S/MIME certificate of $from}")
 
 	read_secret key_pass "$base key passphrase"
 	check_key_pass "$base.key.pem" "$key_pass"
