@@ -21,7 +21,7 @@ Usage:
   $PROG issue encryption|signing [LABEL] [--name NAME] [--email EMAIL] [--days N]
   $PROG issue bot [LABEL] --email BOT_EMAIL [--name NAME] [--days N]
   $PROG export-p12 CERT [--legacy]
-  $PROG export-key CERT > key.pem
+  $PROG export-key CERT | COMMAND
   $PROG cert-mail CERT [--to EMAIL] [--subject TEXT] > CERT.eml
   $PROG list
 
@@ -399,10 +399,10 @@ cmd_export_p12() {
 
 cmd_export_key() {
 	local key_pass
-	[ $# -eq 1 ] || die "usage: $PROG export-key CERT > key.pem"
+	[ $# -eq 1 ] || die "usage: $PROG export-key CERT | COMMAND"
 	check_base "$1"
 	need_files "$1.key.pem"
-	[ ! -t 1 ] || die "refusing to print an unencrypted private key to the terminal; pipe or redirect it"
+	[ ! -t 1 ] || die "refusing to print an unencrypted private key to the terminal; pipe it into the service that needs it"
 	read_secret key_pass "$1 key passphrase"
 	check_key_pass "$1.key.pem" "$key_pass"
 	"$OPENSSL" pkey -in "$1.key.pem" -passin fd:3 3< <(printf '%s\n' "$key_pass")

@@ -52,7 +52,7 @@ A local path to a git checkout uses only committed files.
 | `issue encryption\|signing [LABEL] [--name NAME] [--email EMAIL] [--days N]` | `PROFILE[-LABEL].{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. |
 | `issue bot [LABEL] --email BOT_EMAIL [--name NAME] [--days N]` | `bot[-LABEL].{key.pem,csr.pem,crt.pem}`, no `.p12`. `--email` is required so the bot never gets your address. |
 | `export-p12 CERT [--legacy]` | `CERT.p12`, or `CERT-legacy.p12` with SHA-1/3DES. |
-| `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout. Refuses to write to a terminal. |
+| `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout, to be piped straight into the service that needs it. Refuses to write to a terminal. |
 | `cert-mail CERT [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. |
 | `list` | Serial, subject, expiry, SAN and key usage of every `*.crt.pem`, marked `valid` or `EXPIRED`. |
 
@@ -82,10 +82,22 @@ certificate are kept even if a later step fails. If only the `.p12` failed,
 1. Import `ca.cer` into the mail client (or OS keychain) and trust it for
    email. Correspondents need it too to validate your signatures.
 2. Import the `.p12` files. If the importer reports a wrong password for a
-   correct one, try `export-p12 CERT --legacy`.
+   correct one, try `export-p12 CERT --legacy`. If that file is rejected too,
+   delete it and lower the iteration count to the classic PKCS#12 default:
+   `KDF_ITER=2048 nix run /path/to/this/repo -- export-p12 CERT --legacy`.
+   Fewer iterations make guessing the `.p12` passphrase cheaper, so use a
+   strong one and delete the file after import.
 
 Keep old `encryption*.key.pem` / `.p12` after the certificate expires:
 without them mail encrypted to the old certificate can no longer be read.
+
+## No revocation
+
+The CA publishes no CRL, so a certificate cannot be revoked: it stays valid
+for everyone who trusts the CA until it expires. If a certificate's key is
+compromised, either accept that until expiry or create a new CA, distribute its
+`ca.cer` and reissue all certificates. If the CA key is compromised, a new CA is
+the only option.
 
 ## Bot certificate
 
