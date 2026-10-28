@@ -29,17 +29,17 @@ mkdir -p ~/maildir && cd ~/maildir
 export SMIME_NAME='Your Name'           # CN of the certificates
 export SMIME_EMAIL='you@example.com'    # address in subjectAltName
 
-nix run /path/to/this/repo -- init                       # once: create the CA
-nix run /path/to/this/repo -- issue encryption           # encryption.{key.pem,csr.pem,crt.pem,p12}
-nix run /path/to/this/repo -- issue signing thunderbird  # signing-thunderbird.*
-nix run /path/to/this/repo -- list
+nix run github:sm-th/ca -- init                       # once: create the CA
+nix run github:sm-th/ca -- issue encryption           # encryption.{key.pem,csr.pem,crt.pem,p12}
+nix run github:sm-th/ca -- issue signing thunderbird  # signing-thunderbird.*
+nix run github:sm-th/ca -- list
 ```
 
-Instead of a local path, any flake reference works, e.g.
-`nix run github:OWNER/REPO -- list`. Arguments after `--` go to the tool;
-`nix run /path/to/this/repo -- --help` prints the full usage.
+Arguments after `--` go to the tool; `nix run github:sm-th/ca -- --help`
+prints the full usage. Add `--refresh` to pick up the latest commit.
 
-A local path to a git checkout uses only committed files.
+A local clone works too: `nix run /path/to/clone -- list`. It uses only
+committed files.
 
 ## Commands
 
@@ -84,7 +84,7 @@ certificate are kept even if a later step fails. If only the `.p12` failed,
 2. Import the `.p12` files. If the importer reports a wrong password for a
    correct one, try `export-p12 CERT --legacy`. If that file is rejected too,
    delete it and lower the iteration count to the classic PKCS#12 default:
-   `KDF_ITER=2048 nix run /path/to/this/repo -- export-p12 CERT --legacy`.
+   `KDF_ITER=2048 nix run github:sm-th/ca -- export-p12 CERT --legacy`.
    Fewer iterations make guessing the `.p12` passphrase cheaper, so use a
    strong one and delete the file after import.
 
@@ -105,13 +105,13 @@ A bot that receives encrypted mail and hands out its certificate needs one key
 for both decryption and signing:
 
 ```bash
-nix run /path/to/this/repo -- issue bot --email bot@example.com --name 'Mail Bot'
+nix run github:sm-th/ca -- issue bot --email bot@example.com --name 'Mail Bot'
 
 # the bot cannot type a passphrase: give it the unencrypted key, never via a file
-nix run /path/to/this/repo -- export-key bot | wrangler secret put BOT_KEY
+nix run github:sm-th/ca -- export-key bot | wrangler secret put BOT_KEY
 
 # a signed message that carries bot.crt.pem and ca.crt.pem
-nix run /path/to/this/repo -- cert-mail bot --to you@example.com > bot.eml
+nix run github:sm-th/ca -- cert-mail bot --to you@example.com > bot.eml
 ```
 
 Opening `bot.eml` in a mail client (e.g. after copying it into a mailbox
