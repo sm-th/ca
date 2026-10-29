@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Personal S/MIME CA: EC P-256 keys, PKCS#8 and PKCS#12 protected with
+# Personal S/MIME CA: EC P-256 keys (RSA 3072 on request for encryption),
+# PKCS#8 and PKCS#12 protected with
 # AES-256-CBC + PBKDF2-HMAC-SHA256. Requires OpenSSL 3 or newer (macOS
 # /usr/bin/openssl is LibreSSL and will not work).
 set -euo pipefail
@@ -18,29 +19,31 @@ usage() {
 	cat <<EOF
 Usage:
   $PROG init [--name NAME] [--days N]
-  $PROG issue encryption|signing [LABEL] [--name NAME] [--email EMAIL] [--days N]
-  $PROG issue bot [LABEL] --email BOT_EMAIL [--name NAME] [--days N]
+  $PROG issue signing|encryption [--rsa] [--email EMAIL] [--name NAME] [--days N]
   $PROG export-p12 CERT [--legacy]
   $PROG export-key CERT | COMMAND
-  $PROG cert-mail CERT [--to EMAIL] [--subject TEXT] > CERT.eml
+  $PROG cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT] > mail.eml
   $PROG list
 
-CERT is a certificate's file name without extension, e.g. bot or signing-thunderbird.
+CERT is a certificate's file name without extension, as printed by issue,
+e.g. bot@example.com.signing.20261029.
 
 init        creates ca.key.pem, ca.crt.pem, ca.cer (DER, for import), ca.cnf, ca-db/.
-issue       creates PROFILE[-LABEL].{key.pem,csr.pem,crt.pem,p12}, signed by the CA.
-            Profiles: encryption (keyAgreement), signing (digitalSignature),
-            bot (both, own address required, no .p12).
-            Existing files are never overwritten: use a LABEL for a second cert of
-            the same profile (e.g. "issue signing thunderbird", "issue encryption 2027").
+issue       creates EMAIL.KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}, signed by the CA.
+            KIND: signing (EC P-256, digitalSignature), encryption (EC P-256,
+            keyAgreement) or, with --rsa, encryption-rsa (RSA 3072, keyEncipherment),
+            for iOS Mail, which does not decrypt EC-encrypted mail from Thunderbird.
+            EMAIL is --email or SMIME_EMAIL. Existing files are never overwritten.
+            Signing and encryption use separate keys, also for a bot.
 export-p12  writes CERT.p12 again, e.g. after a failed issue; with --legacy writes
             CERT-legacy.p12 with SHA-1/3DES for importers that reject AES.
 export-key  prints the private key as unencrypted PKCS#8 PEM to stdout, for
             services that cannot enter a passphrase. Refuses to print to a terminal:
-            pipe it, e.g. "$PROG export-key bot | wrangler secret put BOT_KEY".
+            pipe it into the service that needs it.
 cert-mail   prints a message signed with CERT to stdout (From: the address in CERT,
-            To: --to or SMIME_EMAIL). The signature carries CERT and ca.crt.pem, so
-            a mail client that opens the message can install the certificate.
+            To: --to or SMIME_EMAIL). The signature carries CERT, ca.crt.pem and,
+            with --encryption-cert, the encryption certificate for the same address,
+            so a mail client that opens the message can install them.
 list        shows every *.crt.pem in the directory.
 
 Environment:
@@ -94,7 +97,7 @@ check_email() {
 }
 
 check_base() {
-	[[ $1 =~ ^[A-Za-z0-9._-]+$ ]] || die "bad certificate name '$1': use the file name without extension, e.g. bot"
+	[[ $1 =~ ^[A-Za-z0-9._%+@-]+$ ]] || die "bad certificate name '$1': use the file name without extension, as printed by issue"
 	[ "$1" != ca ] || die "refusing to use the CA key here"
 }
 
@@ -119,12 +122,11 @@ check_days() {
 	[[ $1 =~ ^[1-9][0-9]*$ ]] || die "bad --days: $1"
 }
 
-# new_key OUT PASSPHRASE -- EC P-256 key, encrypted PKCS#8
+# new_key OUT PASSPHRASE [rsa] -- EC P-256 or RSA 3072 key, encrypted PKCS#8
 new_key() {
-	"$OPENSSL" genpkey \
-		-algorithm EC \
-		-pkeyopt ec_paramgen_curve:P-256 \
-		-pkeyopt ec_param_enc:named_curve |
+	local -a algorithm=(-algorithm EC -pkeyopt ec_paramgen_curve:P-256 -pkeyopt ec_param_enc:named_curve)
+	[ -z "${3:-}" ] || algorithm=(-algorithm RSA -pkeyopt rsa_keygen_bits:3072)
+	"$OPENSSL" genpkey "${algorithm[@]}" |
 		"$OPENSSL" pkcs8 \
 			-topk8 \
 			-v2 aes-256-cbc \
@@ -270,50 +272,45 @@ EOF
 }
 
 cmd_issue() {
-	local profile='' label='' name=$SMIME_NAME email=$SMIME_EMAIL email_given='' days=$CERT_DAYS
-	local key_usage purpose base f ca_pass key_pass p12_pass=''
+	local profile='' name=$SMIME_NAME email=$SMIME_EMAIL days=$CERT_DAYS rsa=''
+	local key_usage purpose kind base f ca_pass key_pass p12_pass
 	local -a outputs
 	while [ $# -gt 0 ]; do
 		case $1 in
 		--name) [ $# -ge 2 ] || die "--name needs a value"; name=$2; shift 2 ;;
-		--email) [ $# -ge 2 ] || die "--email needs a value"; email=$2; email_given=1; shift 2 ;;
+		--email) [ $# -ge 2 ] || die "--email needs a value"; email=$2; shift 2 ;;
+		--rsa) rsa=1; shift ;;
 		--days) [ $# -ge 2 ] || die "--days needs a value"; days=$2; shift 2 ;;
 		-*) die "unknown option: $1" ;;
-		*)
-			if [ -z "$profile" ]; then
-				profile=$1
-			elif [ -z "$label" ]; then
-				label=$1
-			else
-				die "unexpected argument: $1"
-			fi
-			shift
-			;;
+		*) [ -z "$profile" ] || die "unexpected argument: $1"; profile=$1; shift ;;
 		esac
 	done
 
 	case $profile in
 	encryption)
-		# Verified without a purpose: OpenSSL's smimeencrypt purpose demands
-		# keyEncipherment, which EC keys cannot have (they use keyAgreement).
-		key_usage=keyAgreement
-		purpose=''
+		if [ -n "$rsa" ]; then
+			# iOS Mail decrypts RSA (PKCS#1 v1.5) but not the EC key agreement
+			# Thunderbird uses. Key management only, per the CA/B S/MIME BR.
+			key_usage=keyEncipherment
+			purpose=smimeencrypt
+			kind='encryption-rsa'
+		else
+			# Verified without a purpose: OpenSSL's smimeencrypt purpose demands
+			# keyEncipherment, which EC keys cannot have (they use keyAgreement).
+			key_usage=keyAgreement
+			purpose=''
+			kind=encryption
+		fi
 		;;
 	signing)
+		[ -z "$rsa" ] || die "--rsa is only for encryption"
 		key_usage=digitalSignature
 		purpose=smimesign
+		kind=signing
 		;;
-	bot)
-		# Decrypts mail sent to the bot and signs the cert-mail that hands out
-		# its certificate. The key reaches the bot through export-key: no .p12.
-		key_usage=digitalSignature,keyAgreement
-		purpose=smimesign
-		[ -n "$email_given" ] || die "bot needs its own address: pass --email BOT_EMAIL"
-		;;
-	"") die "profile required: encryption, signing or bot" ;;
-	*) die "unknown profile '$profile': encryption, signing or bot" ;;
+	"") die "profile required: signing or encryption" ;;
+	*) die "unknown profile '$profile': signing or encryption" ;;
 	esac
-	[ -z "$label" ] || [[ $label =~ ^[A-Za-z0-9._-]+$ ]] || die "label may contain only A-Z a-z 0-9 . _ -"
 	check_name "$name"
 	check_email "$email" "set SMIME_EMAIL or pass --email"
 	check_days "$days"
@@ -321,11 +318,10 @@ cmd_issue() {
 	for f in ca.key.pem ca.crt.pem ca.cnf ca-db/index.txt ca-db/serial; do
 		[ -e "$f" ] || die "$SMIME_DIR/$f not found: run '$PROG init' first or set SMIME_DIR"
 	done
-	base=$profile${label:+-$label}
-	outputs=("$base.key.pem" "$base.csr.pem" "$base.crt.pem")
-	[ "$profile" = bot ] || outputs+=("$base.p12")
+	base=$email.$kind.$(date -u '+%Y%m%d')
+	outputs=("$base.key.pem" "$base.csr.pem" "$base.crt.pem" "$base.p12")
 	for f in "${outputs[@]}"; do
-		[ ! -e "$f" ] || die "$SMIME_DIR/$f already exists: pick another LABEL"
+		[ ! -e "$f" ] || die "$SMIME_DIR/$f already exists: the $kind certificate for $email was already issued today"
 	done
 	"$OPENSSL" x509 -in ca.crt.pem -noout -checkend $((days * 86400)) >/dev/null ||
 		die "the CA expires within $days days: lower --days or create a new CA"
@@ -334,10 +330,10 @@ cmd_issue() {
 	check_key_pass ca.key.pem "$ca_pass"
 	read_secret key_pass "New $base key passphrase" confirm
 	[ -n "$key_pass" ] || die "empty passphrase"
-	[ "$profile" = bot ] || read_p12_pass p12_pass "$base.p12" "$key_pass"
+	read_p12_pass p12_pass "$base.p12" "$key_pass"
 
 	make_stage
-	new_key "$STAGE/$base.key.pem" "$key_pass"
+	new_key "$STAGE/$base.key.pem" "$key_pass" "$rsa"
 	"$OPENSSL" req \
 		-new \
 		-config /dev/null \
@@ -377,11 +373,9 @@ EOF
 		mv "$STAGE/$f" "$f"
 	done
 	verify_cert "$base.crt.pem" "$email" "$purpose"
-	if [ "$profile" != bot ]; then
-		make_p12 "$base" "$key_pass" "$p12_pass" "$STAGE/$base.p12" ||
-			die "certificate issued, but $base.p12 failed; retry with: $PROG export-p12 $base"
-		mv "$STAGE/$base.p12" "$base.p12"
-	fi
+	make_p12 "$base" "$key_pass" "$p12_pass" "$STAGE/$base.p12" ||
+		die "certificate issued, but $base.p12 failed; retry with: $PROG export-p12 $base"
+	mv "$STAGE/$base.p12" "$base.p12"
 	"$OPENSSL" x509 -in "$base.crt.pem" -noout -serial -subject -dates -ext subjectAltName,keyUsage
 	printf 'Created %s\n' "${outputs[*]}"
 }
@@ -423,16 +417,17 @@ cmd_export_key() {
 }
 
 cmd_cert_mail() {
-	local base='' to=$SMIME_EMAIL subject='' from key_pass body message
+	local base='' encryption='' to=$SMIME_EMAIL subject='' from key_pass body message
 	while [ $# -gt 0 ]; do
 		case $1 in
+		--encryption-cert) [ $# -ge 2 ] || die "--encryption-cert needs a value"; encryption=$2; shift 2 ;;
 		--to) [ $# -ge 2 ] || die "--to needs a value"; to=$2; shift 2 ;;
 		--subject) [ $# -ge 2 ] || die "--subject needs a value"; subject=$2; shift 2 ;;
 		-*) die "unknown option: $1" ;;
 		*) [ -z "$base" ] || die "unexpected argument: $1"; base=$1; shift ;;
 		esac
 	done
-	[ -n "$base" ] || die "certificate name required, e.g. $PROG cert-mail bot > bot.eml"
+	[ -n "$base" ] || die "certificate name required, e.g. $PROG cert-mail bot@example.com.signing.20261029"
 	check_base "$base"
 	need_files "$base.key.pem" "$base.crt.pem" ca.crt.pem
 	from=$(cert_email "$base.crt.pem")
@@ -440,6 +435,16 @@ cmd_cert_mail() {
 	check_email "$to" "set SMIME_EMAIL or pass --to"
 	verify_cert "$base.crt.pem" "$from" smimesign 2>/dev/null ||
 		die "$base.crt.pem is not a valid signing certificate"
+	if [ -n "$encryption" ]; then
+		check_base "$encryption"
+		need_files "$encryption.crt.pem"
+		verify_cert "$encryption.crt.pem" "$from" 2>/dev/null ||
+			die "$encryption.crt.pem is not a valid certificate for $from"
+		case $("$OPENSSL" x509 -in "$encryption.crt.pem" -noout -ext keyUsage) in
+		*"Key Encipherment"* | *"Key Agreement"*) ;;
+		*) die "$encryption.crt.pem is not an encryption certificate" ;;
+		esac
+	fi
 	subject=$(encode_subject "${subject:-S/MIME certificate of $from}")
 
 	read_secret key_pass "$base key passphrase"
@@ -455,7 +460,7 @@ Install the certificate from the signature details to send encrypted mail to $fr
 			-signer "$base.crt.pem" \
 			-inkey "$base.key.pem" \
 			-passin fd:3 \
-			-certfile ca.crt.pem \
+			-certfile <(cat ca.crt.pem ${encryption:+"$encryption.crt.pem"}) \
 			-text \
 			-from "$from" \
 			-to "$to" \

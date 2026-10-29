@@ -1,17 +1,18 @@
 # smime-ca
 
-A small personal certificate authority for S/MIME mail. It creates a root CA,
-issues separate encryption and signing certificates packed as `.p12` for
-import into mail clients, and a combined certificate for a mail bot.
+A small personal certificate authority for S/MIME mail. It creates a root CA
+and issues separate signing and encryption certificates, packed as `.p12` for
+import into mail clients; a mail bot gets the same pair.
 
-- Keys: EC P-256, stored as encrypted PKCS#8 (AES-256-CBC, PBKDF2-HMAC-SHA256,
-  600000 iterations).
+- Keys: EC P-256 (RSA 3072 for `issue encryption --rsa`), stored as encrypted
+  PKCS#8 (AES-256-CBC, PBKDF2-HMAC-SHA256, 600000 iterations).
 - `.p12`: AES-256-CBC for key and certificates, SHA-256 MAC, 600000 iterations;
   contains the certificate, its key and the CA certificate. `export-p12 --legacy`
   writes a SHA-1/3DES variant for importers that reject AES.
-- Profiles: `encryption` gets `keyUsage=keyAgreement`, `signing` gets
-  `digitalSignature`, `bot` gets both. All have
+- Kinds: `signing` gets `keyUsage=digitalSignature`, `encryption` gets
+  `keyAgreement`, `encryption --rsa` gets `keyEncipherment`. All have
   `extendedKeyUsage=emailProtection` and the address in `subjectAltName`.
+  Signing and encryption never share a key.
 
 ## Requirements
 
@@ -46,32 +47,31 @@ mkdir -p ~/maildir && cd ~/maildir
 export SMIME_NAME='Your Name'           # CN of the certificates
 export SMIME_EMAIL='you@example.com'    # address in subjectAltName
 
-smime-ca init                       # once: create the CA
-smime-ca issue encryption           # encryption.{key.pem,csr.pem,crt.pem,p12}
-smime-ca issue signing thunderbird  # signing-thunderbird.*
+smime-ca init                      # once: create the CA
+smime-ca issue signing             # you@example.com.signing.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}
+smime-ca issue encryption --rsa    # you@example.com.encryption-rsa.YYYYMMDD.*
 smime-ca list
 smime-ca --help                     # full usage
 ```
 
 ## Commands
 
-`CERT` below is a certificate's file name without extension, e.g. `bot` or
-`signing-thunderbird`.
+`CERT` below is a certificate's file name without extension, as printed by
+`issue`, e.g. `bot@example.com.signing.20261029`.
 
 | Command | Result |
 | --- | --- |
 | `init [--name NAME] [--days N]` | `ca.key.pem`, `ca.crt.pem`, `ca.cer` (DER, for import), `ca.cnf`, `ca-db/`. CA subject is `CN=NAME Mail Root CA`, valid 10 years, limited to email by `extendedKeyUsage=emailProtection`. |
-| `issue encryption\|signing [LABEL] [--name NAME] [--email EMAIL] [--days N]` | `PROFILE[-LABEL].{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. Refused if the CA expires earlier. |
-| `issue bot [LABEL] --email BOT_EMAIL [--name NAME] [--days N]` | `bot[-LABEL].{key.pem,csr.pem,crt.pem}`, no `.p12`. `--email` is required so the bot never gets your address. |
+| `issue signing\|encryption [--rsa] [--email EMAIL] [--name NAME] [--days N]` | `EMAIL.KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. `KIND` is `signing`, `encryption` (EC) or `encryption-rsa` (`--rsa`, RSA 3072). `EMAIL` is `--email` or `SMIME_EMAIL`. Refused if the CA expires earlier. |
 | `export-p12 CERT [--legacy]` | `CERT.p12`, or `CERT-legacy.p12` with SHA-1/3DES. Never for `ca`. |
 | `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout, to be piped straight into the service that needs it. Refuses to write to a terminal and never exports `ca`. |
-| `cert-mail CERT [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. A non-ASCII subject is RFC 2047 encoded. |
+| `cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. The signature carries `CERT`, `ca.crt.pem` and the `--encryption-cert` for the same address. A non-ASCII subject is RFC 2047 encoded. |
 | `list` | Serial, subject, expiry, SAN and key usage of every `*.crt.pem`, marked `valid` or `EXPIRED`. |
 
 `issue` asks for the CA passphrase (checked immediately), a new key passphrase
 and a `.p12` export passphrase (empty = same as the key). All prompts come
-before any file is written. Existing files are never overwritten: use a LABEL
-for another certificate of the same profile, e.g. `issue encryption 2027`.
+before any file is written. Existing files are never overwritten, so the same
+kind of certificate for the same address can be issued once a day.
 
 Once the CA has signed, the certificate is recorded in `ca-db/`, so the key and
 certificate are kept even if a later step fails. If only the `.p12` failed,
@@ -104,8 +104,13 @@ certificate are kept even if a later step fails. If only the `.p12` failed,
    `KDF_ITER=2048 smime-ca export-p12 CERT --legacy`.
    Fewer iterations make guessing the `.p12` passphrase cheaper, so use a
    strong one and delete the file after import.
+3. iOS Mail decrypts mail for an RSA encryption certificate, but not mail
+   that Thunderbird encrypts for an EC one. To read encrypted mail on an
+   iPhone, issue the encryption certificate with `--rsa` and select it as the
+   encryption certificate in Thunderbird and on the iPhone; the signing
+   certificate can stay EC.
 
-Keep old `encryption*.key.pem` / `.p12` after the certificate expires:
+Keep old encryption keys (`*.encryption*.key.pem` / `.p12`) after the certificate expires:
 without them mail encrypted to the old certificate can no longer be read.
 
 ## No revocation
@@ -116,23 +121,30 @@ compromised, either accept that until expiry or create a new CA, distribute its
 `ca.cer` and reissue all certificates. If the CA key is compromised, a new CA is
 the only option.
 
-## Bot certificate
+## Bot certificates
 
-A bot that receives encrypted mail and hands out its certificate needs one key
-for both decryption and signing:
+A bot that signs its mail and receives encrypted mail gets two certificates,
+like a person: one key signs, the other decrypts. With a single RSA key, a bot
+that leaks whether decryption failed would also let an attacker sign as the bot
+([ROBOT](https://robotattack.org/)). Use `--rsa` for the encryption key if
+iPhones must encrypt mail to the bot.
 
 ```bash
-smime-ca issue bot --email bot@example.com --name 'Mail Bot'
+smime-ca issue signing --email bot@example.com --name 'Mail Bot'
+smime-ca issue encryption --rsa --email bot@example.com --name 'Mail Bot'
 
-# the bot cannot type a passphrase: give it the unencrypted key, never via a file
-smime-ca export-key bot | wrangler secret put BOT_KEY
+# the bot cannot type a passphrase: give it the unencrypted keys, never via a file
+smime-ca export-key bot@example.com.signing.YYYYMMDD | <bot secret store>
+smime-ca export-key bot@example.com.encryption-rsa.YYYYMMDD | <bot secret store>
 
-# a signed message that carries bot.crt.pem and ca.crt.pem
-smime-ca cert-mail bot --to you@example.com > bot.eml
+# a signed message that carries both bot certificates and ca.crt.pem
+smime-ca cert-mail bot@example.com.signing.YYYYMMDD \
+  --encryption-cert bot@example.com.encryption-rsa.YYYYMMDD --to you@example.com > bot.eml
 ```
 
+Pass `--email`: without it the certificate gets `SMIME_EMAIL`, your own address.
 Opening `bot.eml` in a mail client (e.g. after copying it into a mailbox
-folder) lets the client install the bot's certificate, so it can encrypt mail
+folder) lets the client install the bot's certificates, so it can encrypt mail
 to the bot.
 
 ## Notes
