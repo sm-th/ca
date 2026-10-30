@@ -433,7 +433,7 @@ nss_import() {
 		-passin fd:3 -passout fd:4 -out "$STAGE/$1.p12" \
 		3< <(printf '%s\n' "$3") 4< <(printf '%s\n' "$db_pass")
 	pk12util -i "$STAGE/$1.p12" -d "sql:$STAGE/db" \
-		-k <(printf '%s\n' "$db_pass") -w <(printf '%s\n' "$db_pass") >&2
+		-k <(printf '%s\n' "$db_pass") -w <(printf '%s\n' "$db_pass") >/dev/null
 }
 
 cmd_cert_mail() {
@@ -488,9 +488,9 @@ cmd_cert_mail() {
 	make_stage
 	db_pass=$("$OPENSSL" rand -hex 32)
 	mkdir "$STAGE/db"
-	certutil -N -d "sql:$STAGE/db" -f <(printf '%s\n' "$db_pass") >&2
+	certutil -N -d "sql:$STAGE/db" -f <(printf '%s\n' "$db_pass") >/dev/null
 	nss_import signer "$base" "$key_pass"
-	certutil -A -d "sql:$STAGE/db" -n ca -t ',C,' -i ca.crt.pem -f <(printf '%s\n' "$db_pass") >&2
+	certutil -A -d "sql:$STAGE/db" -n ca -t ',C,' -i ca.crt.pem -f <(printf '%s\n' "$db_pass") >/dev/null
 	pref=NONE
 	if [ -n "$encryption" ]; then
 		nss_import encryption "$encryption" "$enc_pass"
@@ -505,7 +505,7 @@ cmd_cert_mail() {
 		"Install the certificate from the signature details to send encrypted mail to $from." \
 		>"$STAGE/entity"
 	cmsutil -S -T -G -P -H SHA256 -N signer -Y "$pref" -d "sql:$STAGE/db" \
-		-f <(printf '%s\n' "$db_pass") -i "$STAGE/entity" -o "$STAGE/smime.p7s" >&2
+		-f <(printf '%s\n' "$db_pass") -i "$STAGE/entity" -o "$STAGE/smime.p7s" >/dev/null
 	if [ -n "$encryption" ]; then
 		want=$("$OPENSSL" x509 -in "$encryption.crt.pem" -noout -serial)
 		want=${want#serial=}
