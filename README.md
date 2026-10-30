@@ -63,7 +63,7 @@ certificate's path without extension, as printed by `issue`, e.g.
 | Command | Result |
 | --- | --- |
 | `init [--name NAME] [--days N]` | `ca.key.pem`, `ca.crt.pem`, `ca.cer` (DER, for import), `ca.cnf`, `ca-db/`. CA subject is `CN=NAME Mail Root CA`, valid 10 years, limited to email by `extendedKeyUsage=emailProtection`. |
-| `issue signing\|encryption [--rsa] [--email EMAIL] [--name NAME] [--days N]` | `EMAIL/KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. `KIND` is `signing`, `encryption` (EC) or `encryption-rsa` (`--rsa`, RSA 3072). `EMAIL` is `--email` or `SMIME_EMAIL`. Refused if the CA expires earlier. |
+| `issue signing\|encryption [--rsa] [--device DEVICE] [--email EMAIL] [--name NAME] [--days N]` | `EMAIL/KIND[-DEVICE].YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. `KIND` is `signing`, `encryption` (EC) or `encryption-rsa` (`--rsa`, RSA 3072). `--device` (e.g. `iphone`) names the device in the file names and the `.p12` friendly name only, not in the certificate. `EMAIL` is `--email` or `SMIME_EMAIL`. Refused if the CA expires earlier. |
 | `export-p12 CERT [--legacy]` | `CERT.p12`, or `CERT-legacy.p12` with SHA-1/3DES. Never for `ca`. |
 | `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout, to be piped straight into the service that needs it. Refuses to write to a terminal and never exports `ca`. |
 | `cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. The signature carries `CERT`, `ca.crt.pem` and the `--encryption-cert` for the same address. A non-ASCII subject is RFC 2047 encoded. |

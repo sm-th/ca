@@ -19,7 +19,7 @@ usage() {
 	cat <<EOF
 Usage:
   $PROG init [--name NAME] [--days N]
-  $PROG issue signing|encryption [--rsa] [--email EMAIL] [--name NAME] [--days N]
+  $PROG issue signing|encryption [--rsa] [--device DEVICE] [--email EMAIL] [--name NAME] [--days N]
   $PROG export-p12 CERT [--legacy]
   $PROG export-key CERT | COMMAND
   $PROG cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT] > mail.eml
@@ -29,12 +29,14 @@ CERT is a certificate's path without extension, as printed by issue,
 e.g. bot@example.com/signing.20261029 (tab completion works).
 
 init        creates ca.key.pem, ca.crt.pem, ca.cer (DER, for import), ca.cnf, ca-db/.
-issue       creates EMAIL/KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}, signed by the CA.
+issue       creates EMAIL/KIND[-DEVICE].YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}, signed by the CA.
             KIND: signing (EC P-256, digitalSignature), encryption (EC P-256,
             keyAgreement) or, with --rsa, encryption-rsa (RSA 3072, keyEncipherment),
             for iOS Mail, which does not decrypt EC-encrypted mail from Thunderbird.
             EMAIL is --email or SMIME_EMAIL. Existing files are never overwritten.
             Signing and encryption use separate keys, also for a bot.
+            --device names the device the key is for (e.g. iphone); it goes into
+            the file names and the .p12 friendly name, not into the certificate.
 export-p12  writes CERT.p12 again, e.g. after a failed issue; with --legacy writes
             CERT-legacy.p12 with SHA-1/3DES for importers that reject AES.
 export-key  prints the private key as unencrypted PKCS#8 PEM to stdout, for
@@ -273,7 +275,7 @@ EOF
 }
 
 cmd_issue() {
-	local profile='' name=$SMIME_NAME email=$SMIME_EMAIL days=$CERT_DAYS rsa=''
+	local profile='' name=$SMIME_NAME email=$SMIME_EMAIL days=$CERT_DAYS rsa='' device=''
 	local key_usage purpose kind base f ca_pass key_pass p12_pass
 	local -a outputs
 	while [ $# -gt 0 ]; do
@@ -281,6 +283,7 @@ cmd_issue() {
 		--name) [ $# -ge 2 ] || die "--name needs a value"; name=$2; shift 2 ;;
 		--email) [ $# -ge 2 ] || die "--email needs a value"; email=$2; shift 2 ;;
 		--rsa) rsa=1; shift ;;
+		--device) [ $# -ge 2 ] || die "--device needs a value"; device=$2; shift 2 ;;
 		--days) [ $# -ge 2 ] || die "--days needs a value"; days=$2; shift 2 ;;
 		-*) die "unknown option: $1" ;;
 		*) [ -z "$profile" ] || die "unexpected argument: $1"; profile=$1; shift ;;
@@ -315,6 +318,8 @@ cmd_issue() {
 	check_name "$name"
 	check_email "$email" "set SMIME_EMAIL or pass --email"
 	check_days "$days"
+	[ -z "$device" ] || [[ $device =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--device may contain only a-z 0-9 -"
+	kind=$kind${device:+-$device}
 
 	for f in ca.key.pem ca.crt.pem ca.cnf ca-db/index.txt ca-db/serial; do
 		[ -e "$f" ] || die "$SMIME_DIR/$f not found: run '$PROG init' first or set SMIME_DIR"
