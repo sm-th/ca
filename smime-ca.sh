@@ -25,11 +25,11 @@ Usage:
   $PROG cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT] > mail.eml
   $PROG list
 
-CERT is a certificate's file name without extension, as printed by issue,
-e.g. bot@example.com.signing.20261029.
+CERT is a certificate's path without extension, as printed by issue,
+e.g. bot@example.com/signing.20261029 (tab completion works).
 
 init        creates ca.key.pem, ca.crt.pem, ca.cer (DER, for import), ca.cnf, ca-db/.
-issue       creates EMAIL.KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}, signed by the CA.
+issue       creates EMAIL/KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}, signed by the CA.
             KIND: signing (EC P-256, digitalSignature), encryption (EC P-256,
             keyAgreement) or, with --rsa, encryption-rsa (RSA 3072, keyEncipherment),
             for iOS Mail, which does not decrypt EC-encrypted mail from Thunderbird.
@@ -44,7 +44,7 @@ cert-mail   prints a message signed with CERT to stdout (From: the address in CE
             To: --to or SMIME_EMAIL). The signature carries CERT, ca.crt.pem and,
             with --encryption-cert, the encryption certificate for the same address,
             so a mail client that opens the message can install them.
-list        shows every *.crt.pem in the directory.
+list        shows every *.crt.pem in the directory and in EMAIL/ subdirectories.
 
 Environment:
   SMIME_DIR    working directory (default: current directory)
@@ -97,7 +97,8 @@ check_email() {
 }
 
 check_base() {
-	[[ $1 =~ ^[A-Za-z0-9._%+@-]+$ ]] || die "bad certificate name '$1': use the file name without extension, as printed by issue"
+	[[ $1 =~ ^([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+/)?[A-Za-z0-9._%+@-]+$ ]] ||
+		die "bad certificate name '$1': use the path without extension, as printed by issue"
 	[ "$1" != ca ] || die "refusing to use the CA key here"
 }
 
@@ -182,7 +183,7 @@ make_p12() {
 		-inkey "$1.key.pem" \
 		-in "$1.crt.pem" \
 		-certfile ca.crt.pem \
-		-name "$email $1" \
+		-name "$email ${1##*/}" \
 		"${pbe[@]}" \
 		-iter "$KDF_ITER" \
 		-passin fd:3 \
@@ -318,7 +319,7 @@ cmd_issue() {
 	for f in ca.key.pem ca.crt.pem ca.cnf ca-db/index.txt ca-db/serial; do
 		[ -e "$f" ] || die "$SMIME_DIR/$f not found: run '$PROG init' first or set SMIME_DIR"
 	done
-	base=$email.$kind.$(date -u '+%Y%m%d')
+	base=$email/$kind.$(date -u '+%Y%m%d')
 	outputs=("$base.key.pem" "$base.csr.pem" "$base.crt.pem" "$base.p12")
 	for f in "${outputs[@]}"; do
 		[ ! -e "$f" ] || die "$SMIME_DIR/$f already exists: the $kind certificate for $email was already issued today"
@@ -333,6 +334,7 @@ cmd_issue() {
 	read_p12_pass p12_pass "$base.p12" "$key_pass"
 
 	make_stage
+	mkdir -p "$STAGE/$email"
 	new_key "$STAGE/$base.key.pem" "$key_pass" "$rsa"
 	"$OPENSSL" req \
 		-new \
@@ -369,6 +371,7 @@ EOF
 		3< <(printf '%s\n' "$ca_pass")
 
 	# The CA database now records the certificate: keep key and certificate.
+	mkdir -p "$email"
 	for f in "$base.key.pem" "$base.csr.pem" "$base.crt.pem"; do
 		mv "$STAGE/$f" "$f"
 	done
@@ -389,7 +392,7 @@ cmd_export_p12() {
 		*) [ -z "$base" ] || die "unexpected argument: $1"; base=$1; shift ;;
 		esac
 	done
-	[ -n "$base" ] || die "certificate name required, e.g. $PROG export-p12 signing-thunderbird"
+	[ -n "$base" ] || die "certificate name required, e.g. $PROG export-p12 you@example.com/encryption-rsa.20261029"
 	check_base "$base"
 	need_files "$base.key.pem" "$base.crt.pem" ca.crt.pem
 	out=$base${legacy:+-legacy}.p12
@@ -400,6 +403,7 @@ cmd_export_p12() {
 	read_p12_pass p12_pass "$out" "$key_pass"
 
 	make_stage
+	mkdir -p "$STAGE/$(dirname "$out")"
 	make_p12 "$base" "$key_pass" "$p12_pass" "$STAGE/$out" "$legacy"
 	mv "$STAGE/$out" "$out"
 	printf 'Created %s\n' "$out"
@@ -427,7 +431,7 @@ cmd_cert_mail() {
 		*) [ -z "$base" ] || die "unexpected argument: $1"; base=$1; shift ;;
 		esac
 	done
-	[ -n "$base" ] || die "certificate name required, e.g. $PROG cert-mail bot@example.com.signing.20261029"
+	[ -n "$base" ] || die "certificate name required, e.g. $PROG cert-mail bot@example.com/signing.20261029"
 	check_base "$base"
 	need_files "$base.key.pem" "$base.crt.pem" ca.crt.pem
 	from=$(cert_email "$base.crt.pem")
@@ -475,7 +479,7 @@ Install the certificate from the signature details to send encrypted mail to $fr
 
 cmd_list() {
 	local f state
-	for f in *.crt.pem; do
+	for f in *.crt.pem */*.crt.pem; do
 		[ -e "$f" ] || continue
 		if "$OPENSSL" x509 -in "$f" -noout -checkend 0 >/dev/null; then state=valid; else state=EXPIRED; fi
 		printf '== %s (%s)\n' "$f" "$state"

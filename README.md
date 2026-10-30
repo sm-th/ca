@@ -48,25 +48,26 @@ export SMIME_NAME='Your Name'           # CN of the certificates
 export SMIME_EMAIL='you@example.com'    # address in subjectAltName
 
 smime-ca init                      # once: create the CA
-smime-ca issue signing             # you@example.com.signing.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}
-smime-ca issue encryption --rsa    # you@example.com.encryption-rsa.YYYYMMDD.*
+smime-ca issue signing             # you@example.com/signing.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}
+smime-ca issue encryption --rsa    # you@example.com/encryption-rsa.YYYYMMDD.*
 smime-ca list
 smime-ca --help                     # full usage
 ```
 
 ## Commands
 
-`CERT` below is a certificate's file name without extension, as printed by
-`issue`, e.g. `bot@example.com.signing.20261029`.
+Certificates live in one directory per address. `CERT` below is a
+certificate's path without extension, as printed by `issue`, e.g.
+`bot@example.com/signing.20261029`; tab completion works.
 
 | Command | Result |
 | --- | --- |
 | `init [--name NAME] [--days N]` | `ca.key.pem`, `ca.crt.pem`, `ca.cer` (DER, for import), `ca.cnf`, `ca-db/`. CA subject is `CN=NAME Mail Root CA`, valid 10 years, limited to email by `extendedKeyUsage=emailProtection`. |
-| `issue signing\|encryption [--rsa] [--email EMAIL] [--name NAME] [--days N]` | `EMAIL.KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. `KIND` is `signing`, `encryption` (EC) or `encryption-rsa` (`--rsa`, RSA 3072). `EMAIL` is `--email` or `SMIME_EMAIL`. Refused if the CA expires earlier. |
+| `issue signing\|encryption [--rsa] [--email EMAIL] [--name NAME] [--days N]` | `EMAIL/KIND.YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. `KIND` is `signing`, `encryption` (EC) or `encryption-rsa` (`--rsa`, RSA 3072). `EMAIL` is `--email` or `SMIME_EMAIL`. Refused if the CA expires earlier. |
 | `export-p12 CERT [--legacy]` | `CERT.p12`, or `CERT-legacy.p12` with SHA-1/3DES. Never for `ca`. |
 | `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout, to be piped straight into the service that needs it. Refuses to write to a terminal and never exports `ca`. |
 | `cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. The signature carries `CERT`, `ca.crt.pem` and the `--encryption-cert` for the same address. A non-ASCII subject is RFC 2047 encoded. |
-| `list` | Serial, subject, expiry, SAN and key usage of every `*.crt.pem`, marked `valid` or `EXPIRED`. |
+| `list` | Serial, subject, expiry, SAN and key usage of every `*.crt.pem` in the directory and in `EMAIL/`, marked `valid` or `EXPIRED`. |
 
 `issue` asks for the CA passphrase (checked immediately), a new key passphrase
 and a `.p12` export passphrase (empty = same as the key). All prompts come
@@ -134,12 +135,12 @@ smime-ca issue signing --email bot@example.com --name 'Mail Bot'
 smime-ca issue encryption --rsa --email bot@example.com --name 'Mail Bot'
 
 # the bot cannot type a passphrase: give it the unencrypted keys, never via a file
-smime-ca export-key bot@example.com.signing.YYYYMMDD | <bot secret store>
-smime-ca export-key bot@example.com.encryption-rsa.YYYYMMDD | <bot secret store>
+smime-ca export-key bot@example.com/signing.YYYYMMDD | <bot secret store>
+smime-ca export-key bot@example.com/encryption-rsa.YYYYMMDD | <bot secret store>
 
 # a signed message that carries both bot certificates and ca.crt.pem
-smime-ca cert-mail bot@example.com.signing.YYYYMMDD \
-  --encryption-cert bot@example.com.encryption-rsa.YYYYMMDD --to you@example.com > bot.eml
+smime-ca cert-mail bot@example.com/signing.YYYYMMDD \
+  --encryption-cert bot@example.com/encryption-rsa.YYYYMMDD --to you@example.com > bot.eml
 ```
 
 Pass `--email`: without it the certificate gets `SMIME_EMAIL`, your own address.
