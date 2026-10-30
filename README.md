@@ -18,7 +18,9 @@ import into mail clients; a mail bot gets the same pair.
 
 Nix with flakes enabled. OpenSSL comes from the flake; the system `openssl`
 (LibreSSL on macOS) is not used. Without Nix (e.g. on an offline machine),
-`bash smime-ca.sh …` works with bash and OpenSSL 3 or newer.
+`bash smime-ca.sh …` works with bash and OpenSSL 3 or newer; `cert-mail` also
+needs the NSS tools `certutil`, `pk12util` and `cmsutil` (Debian:
+`libnss3-tools`).
 
 ## Running
 
@@ -71,7 +73,7 @@ completion works. `smime-ca list` shows every certificate with its expiry.
 | `issue signing\|encryption [--rsa] [--device DEVICE] [--email EMAIL] [--name NAME] [--days N]` | `EMAIL/KIND[-DEVICE].YYYYMMDD.{key.pem,csr.pem,crt.pem,p12}` signed by the CA, valid 1 year. `KIND` is `signing`, `encryption` (EC) or `encryption-rsa` (`--rsa`, RSA 3072). `--device` (e.g. `iphone`) names the device in the file names and the `.p12` friendly name only, not in the certificate. `EMAIL` is `--email` or `SMIME_EMAIL`. Refused if the CA expires earlier. |
 | `export-p12 CERT [--legacy]` | `CERT.p12`, or `CERT-legacy.p12` with SHA-1/3DES. Never for `ca`. |
 | `export-key CERT` | Unencrypted PKCS#8 PEM of the key on stdout, to be piped straight into the service that needs it. Refuses to write to a terminal and never exports `ca`. |
-| `cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. The signature carries `CERT`, `ca.crt.pem` and the `--encryption-cert` for the same address. A non-ASCII subject is RFC 2047 encoded. |
+| `cert-mail CERT [--encryption-cert CERT] [--to EMAIL] [--subject TEXT]` | Message signed with `CERT` on stdout: `From` is the address in `CERT`, `To` is `--to` or `SMIME_EMAIL`. With `--encryption-cert` (same address) the signature carries it and points to it with `SMIMEEncryptionKeyPreference` ([RFC 8551 §2.5.3](https://www.rfc-editor.org/rfc/rfc8551#section-2.5.3)), which Apple Mail needs. Signed with NSS `cmsutil`, which needs both private keys: asks for both passphrases (Enter = same). Checks that the attribute names the encryption certificate. A non-ASCII subject is RFC 2047 encoded. |
 | `list` | Serial, subject, expiry, SAN and key usage of every `*.crt.pem` in the directory and in `EMAIL/`, marked `valid` or `EXPIRED`. |
 
 `issue` asks for the CA passphrase (checked immediately), a new key passphrase
@@ -195,21 +197,19 @@ smime-ca export-key "$BOT/encryption-rsa.$DAY" | <command that stores the bot's 
 # the bot also needs its certificates and the CA certificate
 ls "$BOT/signing.$DAY.crt.pem" "$BOT/encryption-rsa.$DAY.crt.pem" ca.crt.pem
 
-# a signed message that carries both bot certificates and ca.crt.pem
+# a signed message with both bot certificates, pointing to the encryption one
 smime-ca cert-mail "$BOT/signing.$DAY" \
   --encryption-cert "$BOT/encryption-rsa.$DAY" --to "$SMIME_EMAIL" > bot.eml
 ```
 
 Always pass `--email`: without it the certificate gets `SMIME_EMAIL`, your own
 address. To see a key on screen instead, pipe it through `cat` and clear the
-terminal afterwards. Opening `bot.eml` in Thunderbird (e.g. after copying it
-into a mailbox folder) lets it install the bot's certificates, so it can
-encrypt mail to the bot [inferred, not tested]. **Apple Mail cannot use
-`bot.eml` for that**: `openssl cms` does not add the
-`SMIMEEncryptionKeyPreference` attribute, so Apple Mail takes the bot's
-signing certificate for encryption (see [Apple Mail](#apple-mail)). An iPhone
-gets the bot's encryption certificate from a reply of the bot that carries
-the attribute.
+terminal afterwards. Open `bot.eml` in the mail client (e.g. copy it into an
+iCloud mailbox folder) to install the bot's certificates: the signature points
+to the encryption certificate, so Apple Mail and Thunderbird encrypt to it. On
+iOS 26 the certificate may show up only after editing the bot's contact (see
+[Apple Mail](#apple-mail)); if the iPhone already stored the bot's signing
+certificate for encryption, remove it in the contact first.
 
 What the bot must do with these keys is in [Bot requirements](#bot-requirements).
 
@@ -288,7 +288,8 @@ Other findings:
   Thunderbird adds the attribute
   ([nsCMS.cpp](https://github.com/mozilla/releases-comm-central/blob/master/mailnews/extensions/smime/nsCMS.cpp#L1358-L1379)),
   so separate signing and encryption certificates work between Thunderbird
-  and an iPhone (tested). `openssl cms -sign`, and so `cert-mail`, does not.
+  and an iPhone (tested). `openssl cms -sign` cannot add the attribute, so
+  `cert-mail` signs with NSS `cmsutil`.
 - PKCS#1 v1.5 and AES-CBC are the weakest options S/MIME still requires
   ("MUST-", [RFC 8551 §2.3, §2.7](https://www.rfc-editor.org/rfc/rfc8551#section-2.3)).
   Reduce the attack surface: no read receipts, no auto-replies, no remote

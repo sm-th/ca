@@ -43,9 +43,10 @@ export-key  prints the private key as unencrypted PKCS#8 PEM to stdout, for
             services that cannot enter a passphrase. Refuses to print to a terminal:
             pipe it into the service that needs it.
 cert-mail   prints a message signed with CERT to stdout (From: the address in CERT,
-            To: --to or SMIME_EMAIL). The signature carries CERT, ca.crt.pem and,
-            with --encryption-cert, the encryption certificate for the same address,
-            so a mail client that opens the message can install them.
+            To: --to or SMIME_EMAIL). With --encryption-cert, the signature also
+            carries that certificate and points to it with SMIMEEncryptionKeyPreference,
+            so mail clients, Apple Mail included, encrypt to it. Signed with NSS
+            cmsutil; asks for both keys' passphrases.
 list        shows every *.crt.pem in the directory and in EMAIL/ subdirectories.
 
 Environment:
@@ -425,8 +426,18 @@ cmd_export_key() {
 	"$OPENSSL" pkey -in "$1.key.pem" -passin fd:3 3< <(printf '%s\n' "$key_pass")
 }
 
+# nss_import NICKNAME CERT KEY_PASSPHRASE -- puts key and certificate into the
+# cert-mail NSS database ($STAGE/db, password $db_pass) via a throwaway .p12.
+nss_import() {
+	"$OPENSSL" pkcs12 -export -inkey "$2.key.pem" -in "$2.crt.pem" -name "$1" \
+		-passin fd:3 -passout fd:4 -out "$STAGE/$1.p12" \
+		3< <(printf '%s\n' "$3") 4< <(printf '%s\n' "$db_pass")
+	pk12util -i "$STAGE/$1.p12" -d "sql:$STAGE/db" \
+		-k <(printf '%s\n' "$db_pass") -w <(printf '%s\n' "$db_pass") >&2
+}
+
 cmd_cert_mail() {
-	local base='' encryption='' to=$SMIME_EMAIL subject='' from key_pass body message
+	local base='' encryption='' to=$SMIME_EMAIL subject='' from key_pass enc_pass db_pass pref boundary line want got
 	while [ $# -gt 0 ]; do
 		case $1 in
 		--encryption-cert) [ $# -ge 2 ] || die "--encryption-cert needs a value"; encryption=$2; shift 2 ;;
@@ -441,6 +452,7 @@ cmd_cert_mail() {
 	need_files "$base.key.pem" "$base.crt.pem" ca.crt.pem
 	from=$(cert_email "$base.crt.pem")
 	[ -n "$from" ] || die "$base.crt.pem has no email address"
+	check_email "$from" "unusable address in $base.crt.pem"
 	check_email "$to" "set SMIME_EMAIL or pass --to"
 	verify_cert "$base.crt.pem" "$from" smimesign 2>/dev/null ||
 		die "$base.crt.pem is not a valid signing certificate"
@@ -455,31 +467,73 @@ cmd_cert_mail() {
 		esac
 	fi
 	subject=$(encode_subject "${subject:-S/MIME certificate of $from}")
+	for line in certutil pk12util cmsutil; do
+		command -v "$line" >/dev/null || die "cert-mail needs the NSS tools certutil, pk12util and cmsutil"
+	done
 
 	read_secret key_pass "$base key passphrase"
 	check_key_pass "$base.key.pem" "$key_pass"
+	if [ -n "$encryption" ]; then
+		# NSS points the attribute only at a certificate whose key it holds.
+		need_files "$encryption.key.pem"
+		read_secret enc_pass "$encryption key passphrase (Enter = same as $base)"
+		enc_pass=${enc_pass:-$key_pass}
+		check_key_pass "$encryption.key.pem" "$enc_pass"
+	fi
 
-	body="This message is signed with the S/MIME certificate of $from.
-Install the certificate from the signature details to send encrypted mail to $from."
-	# Built in memory first, so a failure prints nothing.
-	message=$(printf '%s\n' "$body" |
-		"$OPENSSL" cms \
-			-sign \
-			-md sha256 \
-			-signer "$base.crt.pem" \
-			-inkey "$base.key.pem" \
-			-passin fd:3 \
-			-certfile <(cat ca.crt.pem ${encryption:+"$encryption.crt.pem"}) \
-			-text \
-			-from "$from" \
-			-to "$to" \
-			-subject "$subject" \
-			3< <(printf '%s\n' "$key_pass"))
-	printf 'Date: %s\nMessage-ID: <%s@%s>\n%s\n' \
-		"$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')" \
-		"$("$OPENSSL" rand -hex 16)" \
-		"${from#*@}" \
-		"$message"
+	# NSS cmsutil signs, because only it adds SMIMEEncryptionKeyPreference
+	# (RFC 8551 2.5.3): without it Apple Mail encrypts to the signing
+	# certificate. The throwaway NSS database lives in the stage directory and
+	# is locked with a random password.
+	make_stage
+	db_pass=$("$OPENSSL" rand -hex 32)
+	mkdir "$STAGE/db"
+	certutil -N -d "sql:$STAGE/db" -f <(printf '%s\n' "$db_pass") >&2
+	nss_import signer "$base" "$key_pass"
+	certutil -A -d "sql:$STAGE/db" -n ca -t ',C,' -i ca.crt.pem -f <(printf '%s\n' "$db_pass") >&2
+	pref=NONE
+	if [ -n "$encryption" ]; then
+		nss_import encryption "$encryption" "$enc_pass"
+		# Certificates with the signer's subject share its nickname; NSS then
+		# picks the one fit for encryption.
+		pref=signer
+		certutil -L -d "sql:$STAGE/db" -n encryption >/dev/null 2>&1 && pref=encryption
+	fi
+
+	printf 'Content-Type: text/plain; charset=us-ascii\r\n\r\n%s\r\n%s\r\n' \
+		"This message is signed with the S/MIME certificate of $from." \
+		"Install the certificate from the signature details to send encrypted mail to $from." \
+		>"$STAGE/entity"
+	cmsutil -S -T -G -P -H SHA256 -N signer -Y "$pref" -d "sql:$STAGE/db" \
+		-f <(printf '%s\n' "$db_pass") -i "$STAGE/entity" -o "$STAGE/smime.p7s" >&2
+	if [ -n "$encryption" ]; then
+		want=$("$OPENSSL" x509 -in "$encryption.crt.pem" -noout -serial)
+		want=${want#serial=}
+		got=$("$OPENSSL" cms -cmsout -print -inform DER -in "$STAGE/smime.p7s" |
+			awk '/encrypKeyPref/ { f = 1 } f && /INTEGER/ { sub(/^.*:/, ""); print; exit }')
+		while [ "${want#0}" != "$want" ]; do want=${want#0}; done
+		while [ "${got#0}" != "$got" ]; do got=${got#0}; done
+		[ -n "$got" ] && [ "$got" = "$want" ] ||
+			die "the signature does not point to $encryption.crt.pem as encryption certificate"
+	fi
+
+	# Built in the stage first, so a failure prints nothing.
+	boundary=smime-$("$OPENSSL" rand -hex 16)
+	{
+		printf 'Date: %s\r\n' "$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')"
+		printf 'Message-ID: <%s@%s>\r\n' "$("$OPENSSL" rand -hex 16)" "${from#*@}"
+		printf 'From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\n' "$from" "$to" "$subject"
+		printf 'Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary="%s"\r\n\r\n' "$boundary"
+		printf 'This is an S/MIME signed message\r\n\r\n--%s\r\n' "$boundary"
+		cat "$STAGE/entity"
+		printf '\r\n--%s\r\n' "$boundary"
+		printf 'Content-Type: application/pkcs7-signature; name="smime.p7s"\r\n'
+		printf 'Content-Transfer-Encoding: base64\r\n'
+		printf 'Content-Disposition: attachment; filename="smime.p7s"\r\n\r\n'
+		"$OPENSSL" base64 -in "$STAGE/smime.p7s" | while IFS= read -r line; do printf '%s\r\n' "$line"; done
+		printf -- '--%s--\r\n' "$boundary"
+	} >"$STAGE/mail.eml"
+	cat "$STAGE/mail.eml"
 }
 
 cmd_list() {

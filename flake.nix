@@ -25,6 +25,7 @@
             runtimeInputs = [
               pkgs.openssl
               pkgs.coreutils
+              pkgs.nss.tools
             ];
             text = builtins.readFile ./smime-ca.sh;
           };
