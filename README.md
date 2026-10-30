@@ -202,9 +202,14 @@ smime-ca cert-mail "$BOT/signing.$DAY" \
 
 Always pass `--email`: without it the certificate gets `SMIME_EMAIL`, your own
 address. To see a key on screen instead, pipe it through `cat` and clear the
-terminal afterwards. Opening `bot.eml` in a mail client (e.g. after copying it
-into a mailbox folder) lets the client install the bot's certificates, so it
-can encrypt mail to the bot.
+terminal afterwards. Opening `bot.eml` in Thunderbird (e.g. after copying it
+into a mailbox folder) lets it install the bot's certificates, so it can
+encrypt mail to the bot [inferred, not tested]. **Apple Mail cannot use
+`bot.eml` for that**: `openssl cms` does not add the
+`SMIMEEncryptionKeyPreference` attribute, so Apple Mail takes the bot's
+signing certificate for encryption (see [Apple Mail](#apple-mail)). An iPhone
+gets the bot's encryption certificate from a reply of the bot that carries
+the attribute.
 
 What the bot must do with these keys is in [Bot requirements](#bot-requirements).
 
@@ -275,6 +280,15 @@ Other findings:
   signed message ([Apple](https://support.apple.com/en-us/102245)). On iOS 26
   the certificate shows up only after editing the sender's contact, e.g. adding
   a space to Notes ([MacRumors](https://forums.macrumors.com/threads/s-mime-ios-26.2467497/)).
+- Apple Mail takes the encryption certificate a signature points to with the
+  `SMIMEEncryptionKeyPreference` attribute
+  ([RFC 8551 §2.5.3](https://www.rfc-editor.org/rfc/rfc8551#section-2.5.3));
+  without it, it uses the **signing** certificate for encryption
+  ([cmssiginfo.c](https://github.com/apple-oss-distributions/Security/blob/Security-61901.101.4/OSX/libsecurity_smime/lib/cmssiginfo.c#L1633-L1696)).
+  Thunderbird adds the attribute
+  ([nsCMS.cpp](https://github.com/mozilla/releases-comm-central/blob/master/mailnews/extensions/smime/nsCMS.cpp#L1358-L1379)),
+  so separate signing and encryption certificates work between Thunderbird
+  and an iPhone (tested). `openssl cms -sign`, and so `cert-mail`, does not.
 - PKCS#1 v1.5 and AES-CBC are the weakest options S/MIME still requires
   ("MUST-", [RFC 8551 §2.3, §2.7](https://www.rfc-editor.org/rfc/rfc8551#section-2.3)).
   Reduce the attack surface: no read receipts, no auto-replies, no remote
@@ -292,7 +306,12 @@ Thunderbird can talk to it:
   author's encryption certificate taken from the author's signature.
 - Encryption: `EnvelopedData`, key transport `rsaEncryption` (PKCS#1 v1.5,
   never RSA-OAEP), content AES-256-CBC, a MIME entity inside.
-- Its signature carries its signing and encryption certificates and the CA.
+- Its signature carries its signing and encryption certificates and the CA,
+  and **must** have the `SMIMEEncryptionKeyPreference` attribute pointing to
+  its encryption certificate
+  ([RFC 8551 §2.5.3](https://www.rfc-editor.org/rfc/rfc8551#section-2.5.3)):
+  without it Apple Mail encrypts to the signing certificate and fails. The
+  OpenSSL command line cannot add it; the signing library must.
 - It accepts mail encrypted to its encryption certificate and processes it only
   if signed by a certificate of this CA for the `From` address.
 - Every rejected message gets the same answer whatever the reason (decryption,
